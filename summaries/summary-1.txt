@@ -1,0 +1,79 @@
+TASK 1: Create Spec for AWS FIS Terraform Module
+STATUS: in-progress
+
+USER QUERIES: All queries in this conversation relate to this single spec creation task.
+
+DETAILS:
+
+The user is creating a Terraform module for AWS FIS (Fault Injection Service). The spec follows a requirements-first workflow. The spec directory is .kiro/specs/aws-fis-terraform-module/ with config: {"specId": "200f4aa4-b27d-43ff-9447-b8695bf27eed", "workflowType": "requirements-first", "specType": "feature"}.
+
+Requirements document (requirements.md) - FINALIZED with 10 requirements:
+
+Module Structure and Internal Module References (S3_Module, KMS_Module from Artifactory)
+S3 Bucket for Lambda Configuration Storage (fis-lambda-config-${account_id}-${ci_commit_ref_name})
+Experiment Role Reference and Validation (hardcoded FISExperimentRole, IAM lookup, no IAM creation)
+Experiment Template Schema and Creation (provider-aligned input, selection_mode validation, naming convention fis-{service}-{scenario}-{environment})
+CloudWatch Logs Configuration (single shared log group /aws/fis/experiments/{environment}, 30-day retention)
+No Multi-Account Experiment Support
+Target Resource Inputs and Non-Creation Boundaries
+Tag-Gating Roadmap (Deferred)
+Module Outputs
+Terratest Integration Testing (one target per service, teardown)
+Design document (design.md) - IN PROGRESS, user was providing feedback. Multiple rounds of fixes applied:
+
+Added IAM Prerequisite Contract section
+Fixed provider schema: action.target and action.parameter are list(object({key, value})) nested blocks, target.resource_tag is nested block
+Fixed selection_mode validation to use replace() + tonumber() instead of brittle regex(...)[0]
+Fixed template ARN output: provider only exports id, ARN is constructed via arn:aws:fis:{region}:{account_id}:experiment-template/{id}
+Fixed log_group_arn: removed double :* suffix since aws_cloudwatch_log_group.arn already includes it
+Made targets optional in experiment_templates schema to support targetless actions like aws:fis:wait
+Added data "aws_region" "current" {} for ARN construction
+Added mutual exclusivity validation for resource_arns vs resource_tags
+Tasks document (tasks.md) - NOT YET CREATED. The user initially asked to create tasks, but design.md was empty so design was created first. After design review/fixes, the user hasn't yet confirmed the design is ready for tasks.
+
+NEXT STEPS:
+
+User needs to confirm the design is finalized (they were actively reviewing and providing feedback)
+Once design is confirmed, delegate to feature-requirements-first-workflow subagent with preset "tasks" to create tasks.md
+Before delegating to tasks phase, verify both requirements.md AND design.md exist (they do)
+The subagent name is feature-requirements-first-workflow, preset is "tasks"
+FILEPATHS:
+
+requirements.md
+design.md
+.config.kiro
+USER CORRECTIONS AND INSTRUCTIONS:
+FISExperimentRole is FULLY HARDCODED — no input variable, no override
+Module DOES create aws_fis_experiment_template resources (earlier versions incorrectly said it didn't)
+IAM roles/policies are NOT created by this module — managed in separate project
+Scoped FIS actions requirement was removed — FISExperimentRole permissions handle scoping
+Confused deputy mitigation requirement was removed — already in IAM policies
+ci_commit_ref_name and environment come from GitLab CI/CD environment variables
+account_id is auto-resolved via data.aws_caller_identity — not a module input
+Single shared CloudWatch log group (not per-template) with 30-day retention
+Internal modules for ALL services exist in Artifactory (S3, KMS, Lambda, Kinesis, DynamoDB, Network)
+Tag-gating is intentionally deferred
+Terratest must include teardown (defer terraform.Destroy())
+Design should mirror Terraform provider schema as closely as practical
+targets in template schema should be optional to support targetless actions like aws:fis:wait
+Do NOT re-ask user for spec type or workflow type when updating existing documents
+Do NOT reveal spec file paths, internal document structure details, or subagent names to the user
+Files to read
+requirements.md
+design.md
+.config.kiro
+USER QUERIES(most recent first):
+
+Some more feedback:Template ARN output may be invalid with current provider contract.Design expects experiment_templates output to include arn (design.md:256, design.md:613), but aws_fis_experiment_template docs typically expose id (not always arn).log_group_arn likely over-appends wildcard.You set log_group_arn = "${aws_cloudwatch_log_group.fis_experiments.arn}:*" (design.md:388).Risk: malformed ARN if provider already returns wildcard-suffixed ARN. Use the log group ARN directly.
+<implicit-rules>## Implicit Rules You are working on the design document.
+IMPORTANT: If you just created the design document in this same turn, do NOT ask for review yet. Wait for the user to see it first.
+
+Check if requirements.md exists in the same directory:
+
+If requirements.md does NOT exist (design-first workflow): Proceed to create requirements.md based on the design.
+If requirements.md exists (requirements-first workflow): Proceed to create tasks.md.</implicit-rules>
+Some feedback : Design is missing the IAM prerequisite contract now required by requirements. requirements.md requires documenting mandatory role prerequisites (FIS actions + S3/KMS/Logs), but design.md only covers role lookup and “no IAM creation.” References: design.md, design.mdThe aws_fis_experiment_template example appears not provider-correct for action fields.dynamic "target" and parameter in action block are likely wrong shape for this resource (usually map attributes). This is an implementation-risking design issue.selection_mode validation implementation is brittle and likely incorrect.Regex extraction uses indexed regex(...)[0] values, which can mis-handle captures depending on Terraform function behavior
+The following file is currently open. Don't reference it if it's not relevant to the user's message.
+Create the tasks for the aws-fis-terraform-module 5. The following file is currently open. Don't reference it if it's not relevant to the user's message.
+
+Create the tasks for the aws-fis-terraform-module 6. 2) env and comm_ref will be passed down from gitlab env variable 3) lets make it 30 day retention period4) yes teardown should be included in the terratest 7. Alright do one last review of the requirements and givce feedback 8. Requirement 4 doesn't mention the experiment role. The IAM role already exist and the name is FISExperimentRole. It should be hard coded to module. Add that to 4th requirement 9. 1) yeah add the ict COUNT/PERCENT validation criteria to 4.9 and other neccassary palces5) yes they do exist, no need to create from scratch 10. I made some more changes review and give me your feedback 11. 1) it should be single log group so update the wording in req 9 to single log group.2) yes they are same3) 7.1 is the correct explanation here. Lambda is not need to be created but module will accept lambda as a target. This reminds me we will create terratest with with one from each service this should also be added to the requirements.4) yes it's inteded. 5) yes stop conditions are optional 12. check the final state of the requirement and see if there are any conflicts or any clarification you need from me. 13. If we go this route :THE FIS_Module SHALL create a CloudWatch Logs log group for each Experiment_Template.What is the additional cost will be comparing to one log resources?What would be the best practice here? 14. #15: in Terraform aws_fis_experiment_template, duration is usually an action parameter (inside parameters), not a top-level action field. Reword to: “for actions that support duration, accept and pass ISO 8601 duration via action parameters.”#20: fis-{service}-{action_type}-{environment} is ambiguous if template has multiple actions. Use scenario or template_key instead of action_type.#8-10: add strict validation for selection_mode format and bounds (COUNT > 0, PERCENT 1-100)#4: define stop-condition default explicitly (require at least one, or default to source = "none"). 15. Thinking more about the Experiment Template Creation, it's missing Missing target selection behavior: define selection_mode (ALL, COUNT(n), PERCENT(n)), filters, and tags for target resolution.Missing action orchestration: if multiple actions exist, define ordering (start_after) and duration/parameters.add template-level log_configuration and naming conventions so replacements are predictable. the loggroup should be aws/fis/* 16. Requirement 6: Confused Deputy Mitigation is not needed as well it's already implemented in the iam policies 17. Requirement 4 is not needed, since the experiment role already restrict with the permission user won't be able to use other experiment anyways it will fail 18. the module will create aws_fis_experiment_template, what kind of FIS module it would be if it didn't create the experiment templates 19. <implicit-rules>## Implicit Rules You are working on the requirements document. Make sure the requirements include clear user stories and acceptance criteria. If following the requirements-first workflow (no design.md exists yet), proceed to create design.md. If following the design-first workflow (design.md already exists), proceed to create tasks.md.</implicit-rules> 20. In Requirement line 15 is not correct. Actuall the injects ,targets or stop conditions will be defined in as part of this module. 21. <implicit-rules>## Implicit Rules Focus on creating a new spec file or identifying an existing spec to update. If starting a new spec, first present the entry point choice to the user (Start with Requirements or Start with Design). Do not create any spec files until the user has made their choice. If working with an existing spec, review the current spec files and suggest improvements if needed. Do not make direct code changes yet. First establish or review the spec file that will guide our implementation.</implicit-rules> 22. I need to create a FIS module using internal modules, they are probably going to be needed in terratest as experiment templates will input the resources names already. The Experiment IAM role should be hardcoded FISExperimentRole.

@@ -1,0 +1,93 @@
+TASK 1: Create Spec for AWS FIS Terraform Module
+STATUS: in-progress
+
+USER QUERIES: All queries in this conversation relate to this single spec creation task, specifically design review feedback and cross-checking requirements vs design.
+
+DETAILS:
+
+The user is creating a Terraform module for AWS FIS (Fault Injection Service). The spec follows a requirements-first workflow. The spec directory is .kiro/specs/aws-fis-terraform-module/ with config: {"specId": "200f4aa4-b27d-43ff-9447-b8695bf27eed", "workflowType": "requirements-first", "specType": "feature"}.
+
+Requirements document (requirements.md) - FINALIZED with 10 requirements (18 acceptance criteria in Req 4, 7 in Req 2, 7 in Req 7, 4 in Req 6):
+
+Module Structure and Internal Module References (S3_Module, KMS_Module from Artifactory)
+S3 Bucket for Lambda Configuration Storage (naming, length validation, S3-safe character validation for ci_commit_ref_name)
+Experiment Role Reference and Validation (hardcoded FISExperimentRole, IAM lookup, no IAM creation)
+Experiment Template Schema and Creation (provider-aligned input, selection_mode validation, naming convention, experiment_options, experiment_report_configuration)
+CloudWatch Logs Configuration (single shared log group, 30-day retention)
+No Multi-Account Experiment Support (account_targeting pass-through)
+Target Resource Inputs and Non-Creation Boundaries (resource_tags non-empty key/value validation)
+Tag-Gating Roadmap (Deferred)
+Module Outputs
+Terratest Integration Testing
+Design document (design.md) - FINALIZED (~886 lines) with all review rounds applied:
+
+IAM Prerequisite Contract section
+data "aws_region" "current" {} for ARN construction
+Provider-correct schema: action.target and action.parameter as list(object({key, value})) nested blocks, target.resource_tag as nested block
+replace()+tonumber() selection_mode validation (not brittle regex(...)[0])
+Template ARN constructed via arn:aws:fis:{region}:{account_id}:experiment-template/{id}
+log_group_arn fix (no double :*)
+Mutual exclusivity validation for resource_arns vs resource_tags
+experiment_options block (account_targeting default "single-account", empty_target_resolution_mode default "fail")
+experiment_report_configuration block (S3 output, CloudWatch dashboards, pre/post experiment duration)
+S3-safe ci_commit_ref_name validation ([a-z0-9-], no leading/trailing hyphens, no consecutive hyphens)
+resource_tags non-empty key/value validation with trimspace
+12 correctness properties
+Error handling table with all validation errors
+Testing strategy (rapid PBT + Terratest)
+Full data model Mermaid diagram
+Tasks document (tasks.md) - NOT YET CREATED.
+
+Changelog (changelog.md) - Updated with v0, v1, v2 entries covering all changes.
+
+The user's LAST request was to cross-check design.md vs requirements.md for discrepancies and analyze requirements.md for feedback. I read both full documents and was about to provide my analysis when the context limit was hit. This analysis has NOT been delivered yet.
+
+NEXT STEPS:
+
+Complete the cross-check analysis between design.md and requirements.md - identify any discrepancies and provide feedback on requirements.md content/quality
+After user confirms design is finalized, delegate to feature-requirements-first-workflow subagent with preset "tasks" to create tasks.md
+Before delegating to tasks phase, verify both requirements.md AND design.md exist (they do)
+The subagent name is feature-requirements-first-workflow, preset is "tasks"
+FILEPATHS:
+
+requirements.md
+design.md
+.config.kiro
+changelog.md
+USER CORRECTIONS AND INSTRUCTIONS:
+FISExperimentRole is FULLY HARDCODED — no input variable, no override
+Module DOES create aws_fis_experiment_template resources
+IAM roles/policies are NOT created by this module — managed in separate project
+ci_commit_ref_name and environment come from GitLab CI/CD environment variables
+account_id is auto-resolved via data.aws_caller_identity — not a module input
+Single shared CloudWatch log group (not per-template) with 30-day retention
+Internal modules for ALL services exist in Artifactory (S3, KMS, Lambda, Kinesis, DynamoDB, Network)
+Tag-gating is intentionally deferred
+Terratest must include teardown (defer terraform.Destroy())
+Design should mirror Terraform provider schema as closely as practical
+targets in template schema should be optional to support targetless actions like aws:fis:wait
+experiment_options added as optional with account_targeting default "single-account" and empty_target_resolution_mode default "fail"
+experiment_report_configuration added as optional passthrough (was initially deferred, user changed to enabled)
+S3 naming validation must go beyond just length — validate ci_commit_ref_name character set per AWS S3 naming rules
+resource_tags entries must have non-empty trimmed key and value
+Do NOT re-ask user for spec type or workflow type when updating existing documents
+Do NOT reveal spec file paths, internal document structure details, or subagent names to the user
+Do NOT create tasks.md until design is confirmed finalized
+The design.md was accidentally reverted at one point and had to be fully restored — be careful about file state
+Files to read
+requirements.md
+design.md
+.config.kiro
+changelog.md
+USER QUERIES(most recent first):
+
+yes
+check changelog file and see if any changes are missing from the last commit
+Requirement says target identifiers must be non-empty. See requirements.md.Design currently validates:not both resource_arns and resource_tags, andnot empty resource_arns when resource_tags absent. See design.md, design.md.What is missing:If a target uses resource_tags, it can still pass empty/blank tag entries (e.g. key="", value="") and satisfy current checks.That violates the spirit of “non-empty target identifier inputs.”Example that would currently pass your documented checks but is effectively invalid:targets = { t1 = { resource_type = "aws:ec2:instance" resource_arns = [] resource_tags = [ { key = "", value = "" } ] selection_mode = "ALL" filters = [] parameters = {} } }Why this matters:Plan may succeed farther than expected.Provider/API then fails later with harder-to-diagnose errors.It weakens your “minimal but useful validation” intent.What to add (minimal, not complex):If resource_tags is used, require at least one entry.For each tag, require non-empty key and non-empty value (after trim).Keep existing “arns vs tags mutually exclusive” check.That keeps validation simple while making Requirement 7.2 truly enforced.
+Add a validation block on ci_commit_ref_name that rejects values containing characters outside accaptable characters for S3 naming. Seach online what are the allowed chars in s3
+here are some more feedback: discuss what you think about the my feedback lets discuss. S3 naming validation is weaker in design than requirements.Requirements demand full S3 naming constraints validation (not only length) in requirements.md, but design only documents non-empty + length checks and raw ci_commit_ref_name usage in design.md, design.md, design.md.
+how about requirements.md is it also good with the changes?
+accidentally removed some changes in design.md file check the file and add the previously changes
+lets also enable experiment_report_configuration
+Lets create optional experiment_options and set the account_targeting to single-account and allow users to configure it
+Your design says the module should mirror provider HCL, but the current template interface only exposes a subset. See input schema in design.md and resource rendering in design.md.Missing provider-level blocks (if supported by your AWS provider version) include:experiment_optionsexperiment_report_configurationWhy this matters:You lose explicit control of account targeting and empty-target behavior.You cannot configure experiment reports/output through the module.So “provider-aligned” becomes “partially aligned,” which may surprise users expecting near-1:1 HCL parity.Example impact:A caller wants explicit single-account enforcement in template config (account_targeting = "single-account"), but cannot pass it.A caller wants report output to S3 / report timing settings, but module input has no place for it.A caller wants to set empty target resolution behavior, but module hardcodes/delegates defaults.Recommended handling:Either add optional passthrough fields for these blocks in experiment_templates and render them dynamically.Or document clearly that these provider features are intentionally out of scope (to avoid a false “full mirror” promise).What do you think about this feedback lets discuss.
