@@ -1,0 +1,15 @@
+{
+  "enabled": true,
+  "name": "Sync Spec on Tasks Change",
+  "description": "When a tasks.md file inside a spec folder is edited, prompts the agent to review the changes and suggest updates to the corresponding requirements.md and design.md files to keep them consistent.",
+  "version": "1",
+  "when": {
+    "type": "userTriggered"
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "The tasks.md file in a spec was just edited. Review the current tasks.md content and compare it against the corresponding requirements.md and design.md (if they exist) in the same spec folder. Check if task changes imply new requirements, modified acceptance criteria, or design adjustments. Suggest specific updates to requirements and/or design to keep them aligned. Only suggest changes that are necessary — do not rewrite unchanged sections."
+  },
+  "workspaceFolderName": "fis-module",
+  "shortName": "sync-on-tasks-change"
+}

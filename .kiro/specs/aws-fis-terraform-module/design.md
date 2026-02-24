@@ -4,25 +4,70 @@
 
 This design describes a Terraform module (`FIS_Module`) that provisions AWS Fault Injection Service experiment templates and supporting infrastructure. The module:
 
-- Creates `aws_fis_experiment_template` resources from a structured, provider-aligned input map
+- Creates `aws_fis_experiment_template` resources from a structured, provider-aligned input map (core experiment definition, experiment options, and experiment reporting)
 - Provisions a single KMS-encrypted S3 bucket (via internal `S3_Module` and `KMS_Module`) for Lambda fault-injection config artifacts
 - Creates a single shared CloudWatch Logs log group for experiment execution logs
 - Looks up the pre-existing `FISExperimentRole` IAM role via data source — never creates IAM resources
 - Accepts target resource identifiers as inputs — never creates workload resources
 
-The module enforces minimal validation at the module level. The Terraform AWS provider and AWS FIS API are the authoritative validators for action/target compatibility and parameter correctness. The one exception is `Selection_Mode` bounds checking (`COUNT(n) > 0`, `PERCENT(n) 1–100`).
+The module enforces minimal validation at the module level. The Terraform AWS provider and AWS FIS API are the authoritative validators for action/target compatibility and parameter correctness. The one exception is `Selection_Mode` bounds checking (`COUNT(n) > 0`, `PERCENT(n) 1–100`). The module is provider-aligned for core experiment definition including experiment options and experiment reporting.
 
 ### Key Design Decisions
 
 | Decision | Rationale |
 |---|---|
-| Provider-aligned input schema | Reduces mapping complexity; users familiar with `aws_fis_experiment_template` can adopt quickly |
+| Provider-aligned input schema (core experiment definition) | Reduces mapping complexity; users familiar with `aws_fis_experiment_template` can adopt quickly. Covers actions, targets, stop conditions, log configuration, experiment options, and experiment reporting. |
 | Hardcoded `FISExperimentRole` | Single-role convention simplifies lookup; no IAM creation in module scope |
 | Shared CloudWatch log group | Low FIS log volume; one log group per environment is sufficient |
 | Minimal module-level validation | Provider/API catch most errors with better messages; module validates only what it must |
 | Internal S3/KMS modules from Artifactory | Organizational compliance; no direct `aws_s3_bucket` or `aws_kms_key` resources |
 | Tag-gating deferred | Documented as future work; optional tag selectors accepted but not enforced |
+| `experiment_report_configuration` optional passthrough | Experiment reporting (S3 destination, CloudWatch dashboard data sources, pre/post experiment duration) is supported as an optional block. Callers can configure S3 report output and data sources per template when needed. |
+| Optional targets in template schema | Mirrors provider behavior; supports targetless actions (e.g., `aws:fis:wait`) used in multi-action orchestration |
 | No multi-account support | Scoped to single-account experiments only |
+
+## IAM Prerequisite Contract
+
+The `FISExperimentRole` IAM role is a mandatory prerequisite that must exist before this module can be used. This module never creates IAM resources — the role is managed in a separate IAM project.
+
+### Required Role Configuration
+
+| Aspect | Requirement |
+|---|---|
+| Role Name | `FISExperimentRole` (hardcoded lookup) |
+| Trust Policy | Must trust `fis.amazonaws.com` as a service principal |
+| FIS Action Permissions | Must allow FIS actions on S3, Kinesis, DynamoDB, Lambda, and Network targets |
+| S3 Access | Must allow access to the Lambda config bucket provisioned by this module |
+| KMS Access | Must allow use of the KMS encryption key provisioned by this module |
+| CloudWatch Logs Access | Must allow writing to the shared experiment log group (`/aws/fis/experiments/{environment}`) |
+
+### Trust Policy (Minimum)
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": { "Service": "fis.amazonaws.com" },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+```
+
+### Permission Scope
+
+The role must have policies granting:
+
+1. **FIS experiment actions** — permissions for the specific FIS fault-injection actions used in experiment templates (e.g., `s3:PauseBucketReplication`, `kinesis:*`, `dynamodb:*`, `lambda:*`, `ec2:*` as needed per experiment scope)
+2. **S3 access** — read/write to the `fis-lambda-config-*` bucket for Lambda fault-injection configuration artifacts
+3. **KMS access** — `kms:Decrypt`, `kms:GenerateDataKey` on the module-provisioned KMS key for S3 encryption
+4. **CloudWatch Logs access** — `logs:CreateLogStream`, `logs:PutLogEvents` on the shared log group ARN
+
+### Failure Mode
+
+If the role does not exist or lacks the required trust policy, `data.aws_iam_role.fis_experiment_role` will fail during `terraform plan`/`apply` with a clear error. If the role exists but lacks sufficient permissions, experiments will fail at runtime with AWS FIS API errors.
 
 ## Architecture
 
@@ -33,7 +78,7 @@ graph TD
     subgraph "FIS_Module"
         direction TB
         VARS[variables.tf<br/>Module Inputs]
-        MAIN[main.tf<br/>Provider, Data Sources]
+        MAIN[main.tf<br/>Provider, Data Sources<br/>aws_caller_identity, aws_region, aws_iam_role]
         KMS[kms.tf<br/>KMS_Module reference]
         S3[s3.tf<br/>S3_Module reference]
         LOGS[logs.tf<br/>CloudWatch Log Group]
@@ -85,6 +130,7 @@ sequenceDiagram
     User->>Vars: environment, ci_commit_ref_name, experiment_templates
     Vars->>Main: validated inputs
     Main->>Main: data.aws_caller_identity → account_id
+    Main->>Main: data.aws_region → region name (for ARN construction)
     Main->>Main: data.aws_iam_role("FISExperimentRole") → role_arn
     Main->>KMS: provision KMS key
     KMS-->>S3: kms_key_arn
@@ -94,7 +140,7 @@ sequenceDiagram
     Main-->>FIS: role_arn
     Logs-->>FIS: log_group_arn
     FIS->>FIS: for_each over experiment_templates → aws_fis_experiment_template
-    FIS-->>Out: template IDs, ARNs, names
+    FIS-->>Out: template IDs, constructed ARNs, names
     S3-->>Out: bucket name, ARN
     KMS-->>Out: key ID, ARN
     Logs-->>Out: log group name, ARN
@@ -107,7 +153,7 @@ sequenceDiagram
 
 | File | Responsibility |
 |---|---|
-| `main.tf` | Provider configuration, `data.aws_caller_identity`, `data.aws_iam_role` lookup |
+| `main.tf` | Provider configuration, `data.aws_caller_identity`, `data.aws_region`, `data.aws_iam_role` lookup |
 | `variables.tf` | All module input variables with types, defaults, descriptions, and validation blocks |
 | `kms.tf` | `KMS_Module` invocation for S3 encryption key |
 | `s3.tf` | `S3_Module` invocation for Lambda config bucket |
@@ -137,22 +183,44 @@ variable "experiment_templates" {
     actions = map(object({
       action_id   = string                       # FIS action type ID (e.g., "aws:s3:bucket-pause-replication")
       description = optional(string, "")
-      target      = optional(map(string), {})    # key = target key reference within this template
-      start_after = optional(list(string), [])   # action dependency ordering
-      parameters  = optional(map(string), {})    # action-specific parameters (e.g., duration)
+      start_after = optional(set(string), [])    # action dependency ordering (set of action names)
+
+      # target is a nested block with key/value pairs, NOT a map attribute.
+      # Each entry maps a target type key (e.g., "Buckets") to a target name defined in this template.
+      targets = optional(list(object({
+        key   = string                           # target type key (e.g., "Instances", "Buckets")
+        value = string                           # references a target name within this template
+      })), [])
+
+      # parameter is a nested block with key/value pairs, NOT a map attribute.
+      # Each entry passes an action-specific parameter (e.g., duration).
+      parameters = optional(list(object({
+        key   = string                           # parameter name (e.g., "duration")
+        value = string                           # parameter value (e.g., "PT5M")
+      })), [])
     }))
 
     # Targets block — maps directly to aws_fis_experiment_template target blocks
-    targets = map(object({
+    # targets is optional to support targetless actions like aws:fis:wait; defaults to empty map
+    targets = optional(map(object({
       resource_type  = string                    # FIS resource type (e.g., "aws:s3:bucket")
       selection_mode = optional(string, "ALL")   # ALL | COUNT(n) | PERCENT(n)
       resource_arns  = optional(list(string), [])
-      resource_tags  = optional(map(string), {}) # optional tag-based selection
-      filters        = optional(list(object({
+
+      # resource_tag is a nested block with key/value pairs, NOT map(string).
+      # Conflicts with resource_arns — only one of resource_arns or resource_tags may be used.
+      resource_tags = optional(list(object({
+        key   = string
+        value = string
+      })), [])
+
+      filters = optional(list(object({
         path   = string
         values = list(string)
       })), [])
-    }))
+
+      parameters = optional(map(string), {})     # optional target-level parameters (map attribute)
+    })), {})
 
     # Stop conditions
     stop_conditions = optional(list(object({
@@ -162,7 +230,40 @@ variable "experiment_templates" {
 
     # Tags for the template resource itself
     tags = optional(map(string), {})
+
+    # Experiment options — optional block for account targeting and empty target resolution
+    experiment_options = optional(object({
+      account_targeting            = optional(string, "single-account")
+      empty_target_resolution_mode = optional(string, "fail")
+    }), null)
+
+    # Experiment report configuration — optional block for S3 report output and CloudWatch data sources
+    experiment_report_configuration = optional(object({
+      outputs = optional(object({
+        s3_configuration = optional(object({
+          bucket_name = string
+          prefix      = optional(string, "")
+        }), null)
+      }), null)
+      data_sources = optional(object({
+        cloudwatch_dashboards = optional(list(object({
+          dashboard_identifier = string
+        })), [])
+      }), null)
+      pre_experiment_duration  = optional(string, null)   # ISO 8601 duration e.g. "PT5M"
+      post_experiment_duration = optional(string, null)   # ISO 8601 duration e.g. "PT5M"
+    }), null)
   }))
+
+  validation {
+    condition = alltrue([
+      for tpl_key, tpl in var.experiment_templates : alltrue([
+        for tgt_key, tgt in tpl.targets :
+          !(length(tgt.resource_arns) > 0 && length(tgt.resource_tags) > 0)
+      ]) if length(tpl.targets) > 0
+    ])
+    error_message = "A target cannot specify both resource_arns and resource_tags. Use one or the other."
+  }
 }
 ```
 
@@ -179,7 +280,7 @@ Each template is named `fis-{service}-{scenario}-{environment}` where the map ke
 | `s3_bucket_arn` | `string` | ARN of the Lambda config S3 bucket |
 | `kms_key_id` | `string` | ID of the KMS key used for S3 encryption |
 | `kms_key_arn` | `string` | ARN of the KMS key |
-| `experiment_templates` | `map(object({id, arn, name}))` | Map of created template metadata keyed by template key |
+| `experiment_templates` | `map(object({id, arn, name}))` | Map of created template metadata keyed by template key. `arn` is constructed from `id` using `arn:aws:fis:{region}:{account_id}:experiment-template/{id}` because the `aws_fis_experiment_template` resource only exports `id`, not `arn`. |
 | `log_group_name` | `string` | Name of the shared CloudWatch log group |
 | `log_group_arn` | `string` | ARN of the shared CloudWatch log group |
 
@@ -191,12 +292,15 @@ Each template is named `fis-{service}-{scenario}-{environment}` where the map ke
 ```hcl
 data "aws_caller_identity" "current" {}
 
+data "aws_region" "current" {}
+
 data "aws_iam_role" "fis_experiment_role" {
   name = "FISExperimentRole"
 }
 ```
 
 - `aws_caller_identity` resolves `account_id` for S3 bucket naming — no user input needed.
+- `aws_region` resolves the current region for constructing experiment template ARNs (the `aws_fis_experiment_template` resource only exports `id`, not `arn`).
 - `aws_iam_role` lookup fails with a clear Terraform error if the role doesn't exist, satisfying Requirement 3.3.
 
 #### `kms.tf` — KMS Key via Internal Module
@@ -254,15 +358,22 @@ resource "aws_fis_experiment_template" "this" {
       description = action.value.description
 
       dynamic "target" {
-        for_each = action.value.target
+        for_each = action.value.targets
         content {
-          key   = target.key
-          value = target.value
+          key   = target.value.key
+          value = target.value.value
         }
       }
 
       start_after = action.value.start_after
-      parameter   = action.value.parameters
+
+      dynamic "parameter" {
+        for_each = action.value.parameters
+        content {
+          key   = parameter.value.key
+          value = parameter.value.value
+        }
+      }
     }
   }
 
@@ -272,8 +383,15 @@ resource "aws_fis_experiment_template" "this" {
       name           = target.key
       resource_type  = target.value.resource_type
       selection_mode = target.value.selection_mode
-      resource_arns  = target.value.resource_arns
-      resource_tags  = target.value.resource_tags
+      resource_arns  = length(target.value.resource_arns) > 0 ? target.value.resource_arns : null
+
+      dynamic "resource_tag" {
+        for_each = target.value.resource_tags
+        content {
+          key   = resource_tag.value.key
+          value = resource_tag.value.value
+        }
+      }
 
       dynamic "filter" {
         for_each = target.value.filters
@@ -282,6 +400,8 @@ resource "aws_fis_experiment_template" "this" {
           values = filter.value.values
         }
       }
+
+      parameters = length(target.value.parameters) > 0 ? target.value.parameters : null
     }
   }
 
@@ -293,9 +413,49 @@ resource "aws_fis_experiment_template" "this" {
     }
   }
 
+  dynamic "experiment_options" {
+    for_each = each.value.experiment_options != null ? [each.value.experiment_options] : []
+    content {
+      account_targeting            = experiment_options.value.account_targeting
+      empty_target_resolution_mode = experiment_options.value.empty_target_resolution_mode
+    }
+  }
+
+  dynamic "experiment_report_configuration" {
+    for_each = each.value.experiment_report_configuration != null ? [each.value.experiment_report_configuration] : []
+    content {
+      dynamic "outputs" {
+        for_each = experiment_report_configuration.value.outputs != null ? [experiment_report_configuration.value.outputs] : []
+        content {
+          dynamic "s3_configuration" {
+            for_each = outputs.value.s3_configuration != null ? [outputs.value.s3_configuration] : []
+            content {
+              bucket_name = s3_configuration.value.bucket_name
+              prefix      = s3_configuration.value.prefix
+            }
+          }
+        }
+      }
+      dynamic "data_sources" {
+        for_each = experiment_report_configuration.value.data_sources != null ? [experiment_report_configuration.value.data_sources] : []
+        content {
+          dynamic "cloudwatch_dashboards" {
+            for_each = data_sources.value.cloudwatch_dashboards
+            content {
+              dashboard_identifier = cloudwatch_dashboards.value.dashboard_identifier
+            }
+          }
+        }
+      }
+      pre_experiment_duration  = experiment_report_configuration.value.pre_experiment_duration
+      post_experiment_duration = experiment_report_configuration.value.post_experiment_duration
+    }
+  }
+
   log_configuration {
     cloudwatch_logs_configuration {
-      log_group_arn = "${aws_cloudwatch_log_group.fis_experiments.arn}:*"
+      # aws_cloudwatch_log_group.arn already includes the :* suffix required by FIS
+      log_group_arn = aws_cloudwatch_log_group.fis_experiments.arn
     }
     log_schema_version = 2
   }
@@ -309,6 +469,21 @@ resource "aws_fis_experiment_template" "this" {
 
 The `each.key` in the `experiment_templates` map encodes `{service}-{scenario}`, so the template `Name` tag becomes `fis-{service}-{scenario}-{environment}`.
 
+#### Constructed Template ARNs
+
+The `aws_fis_experiment_template` resource only exports `id`, not `arn`. The module constructs ARNs in a local:
+
+```hcl
+locals {
+  experiment_template_arns = {
+    for key, tpl in aws_fis_experiment_template.this :
+    key => "arn:aws:fis:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:experiment-template/${tpl.id}"
+  }
+}
+```
+
+This is consumed by `outputs.tf` to include `arn` in the `experiment_templates` output map.
+
 ### Validation Logic
 
 The module implements minimal validation:
@@ -320,24 +495,52 @@ The module implements minimal validation:
 
 ```hcl
 locals {
-  selection_mode_validations = flatten([
+  # Parse selection_mode into components for validation — avoids brittle regex(...)[0] capture indexing
+  selection_mode_checks = flatten([
     for tpl_key, tpl in var.experiment_templates : [
       for tgt_key, tgt in tpl.targets : {
-        key  = "${tpl_key}.${tgt_key}"
-        mode = tgt.selection_mode
-        valid = (
-          tgt.selection_mode == "ALL" ||
-          (can(regex("^COUNT\\((\\d+)\\)$", tgt.selection_mode)) &&
-           tonumber(regex("^COUNT\\((\\d+)\\)$", tgt.selection_mode)[0]) > 0) ||
-          (can(regex("^PERCENT\\((\\d+)\\)$", tgt.selection_mode)) &&
-           tonumber(regex("^PERCENT\\((\\d+)\\)$", tgt.selection_mode)[0]) >= 1 &&
-           tonumber(regex("^PERCENT\\((\\d+)\\)$", tgt.selection_mode)[0]) <= 100)
+        key        = "${tpl_key}.${tgt_key}"
+        mode       = tgt.selection_mode
+        is_all     = tgt.selection_mode == "ALL"
+        is_count   = can(regex("^COUNT\\(\\d+\\)$", tgt.selection_mode))
+        is_percent = can(regex("^PERCENT\\(\\d+\\)$", tgt.selection_mode))
+        # Extract numeric value safely using replace instead of regex capture groups
+        numeric_value = (
+          can(regex("^COUNT\\(\\d+\\)$", tgt.selection_mode))
+            ? tonumber(replace(replace(tgt.selection_mode, "COUNT(", ""), ")", ""))
+          : can(regex("^PERCENT\\(\\d+\\)$", tgt.selection_mode))
+            ? tonumber(replace(replace(tgt.selection_mode, "PERCENT(", ""), ")", ""))
+          : null
         )
       }
     ]
   ])
+
+  # Format validation: must be ALL, COUNT(n), or PERCENT(n)
+  invalid_selection_mode_formats = [
+    for check in local.selection_mode_checks : check.key
+    if !(check.is_all || check.is_count || check.is_percent)
+  ]
+
+  # Bounds validation: COUNT(n) must have n > 0
+  invalid_count_bounds = [
+    for check in local.selection_mode_checks : check.key
+    if check.is_count && check.numeric_value != null && check.numeric_value <= 0
+  ]
+
+  # Bounds validation: PERCENT(n) must have 1 <= n <= 100
+  invalid_percent_bounds = [
+    for check in local.selection_mode_checks : check.key
+    if check.is_percent && check.numeric_value != null && (check.numeric_value < 1 || check.numeric_value > 100)
+  ]
 }
 ```
+
+These locals are consumed by `precondition` or `validation` blocks:
+
+- `length(local.invalid_selection_mode_formats) == 0` — rejects unknown formats
+- `length(local.invalid_count_bounds) == 0` — rejects `COUNT(0)` or negative
+- `length(local.invalid_percent_bounds) == 0` — rejects `PERCENT(0)` or `PERCENT(101+)`
 
 All other validation (action/target compatibility, parameter correctness, resource type validity) is delegated to the Terraform AWS provider and AWS FIS API.
 
@@ -350,25 +553,43 @@ classDiagram
     class ExperimentTemplate {
         +string description
         +map~Action~ actions
-        +map~Target~ targets
+        +map~Target~ targets [optional, default empty]
         +list~StopCondition~ stop_conditions
         +map~string~ tags
+        +ExperimentOptions experiment_options [optional, default null]
+        +ExperimentReportConfiguration experiment_report_configuration [optional, default null]
     }
 
     class Action {
         +string action_id
         +string description
-        +map~string~ target
-        +list~string~ start_after
-        +map~string~ parameters
+        +list~ActionTarget~ targets
+        +set~string~ start_after
+        +list~ActionParameter~ parameters
+    }
+
+    class ActionTarget {
+        +string key
+        +string value
+    }
+
+    class ActionParameter {
+        +string key
+        +string value
     }
 
     class Target {
         +string resource_type
         +string selection_mode
         +list~string~ resource_arns
-        +map~string~ resource_tags
+        +list~ResourceTag~ resource_tags
         +list~Filter~ filters
+        +map~string~ parameters
+    }
+
+    class ResourceTag {
+        +string key
+        +string value
     }
 
     class Filter {
@@ -381,11 +602,51 @@ classDiagram
         +string value
     }
 
+    class ExperimentOptions {
+        +string account_targeting [default: single-account]
+        +string empty_target_resolution_mode [default: fail]
+    }
+
+    class ExperimentReportConfiguration {
+        +ReportOutputs outputs [optional, default null]
+        +ReportDataSources data_sources [optional, default null]
+        +string pre_experiment_duration [optional, default null]
+        +string post_experiment_duration [optional, default null]
+    }
+
+    class ReportOutputs {
+        +S3Configuration s3_configuration [optional, default null]
+    }
+
+    class S3Configuration {
+        +string bucket_name
+        +string prefix [default: empty]
+    }
+
+    class ReportDataSources {
+        +list~CloudWatchDashboard~ cloudwatch_dashboards [default: empty]
+    }
+
+    class CloudWatchDashboard {
+        +string dashboard_identifier
+    }
+
     ExperimentTemplate "1" --> "*" Action : actions
     ExperimentTemplate "1" --> "*" Target : targets
     ExperimentTemplate "1" --> "*" StopCondition : stop_conditions
+    ExperimentTemplate "1" --> "0..1" ExperimentOptions : experiment_options
+    ExperimentTemplate "1" --> "0..1" ExperimentReportConfiguration : experiment_report_configuration
+    Action "1" --> "*" ActionTarget : targets
+    Action "1" --> "*" ActionParameter : parameters
+    Target "1" --> "*" ResourceTag : resource_tags
     Target "1" --> "*" Filter : filters
+    ExperimentReportConfiguration "1" --> "0..1" ReportOutputs : outputs
+    ExperimentReportConfiguration "1" --> "0..1" ReportDataSources : data_sources
+    ReportOutputs "1" --> "0..1" S3Configuration : s3_configuration
+    ReportDataSources "1" --> "*" CloudWatchDashboard : cloudwatch_dashboards
 ```
+
+**Constraint**: `Target.resource_arns` and `Target.resource_tags` are mutually exclusive — a target must use one or the other, not both.
 
 ### Resource Naming Conventions
 
@@ -471,7 +732,7 @@ classDiagram
 
 ### Property 11: Output Map Completeness
 
-*For any* experiment template key in the input map, the `experiment_templates` output map SHALL contain a corresponding entry with non-empty `id`, `arn`, and `name` fields.
+*For any* experiment template key in the input map, the `experiment_templates` output map SHALL contain a corresponding entry with non-empty `id`, `arn`, and `name` fields. The `arn` is constructed as `arn:aws:fis:{region}:{account_id}:experiment-template/{id}` using `data.aws_region.current.name` and `data.aws_caller_identity.current.account_id`, since the `aws_fis_experiment_template` resource only exports `id`.
 
 **Validates: Requirements 9.4**
 
@@ -483,12 +744,14 @@ classDiagram
 | Error Condition | Mechanism | Message Guidance |
 |---|---|---|
 | `FISExperimentRole` IAM role not found | `data.aws_iam_role` lookup failure | Terraform surfaces "role not found" error from AWS API |
+| `FISExperimentRole` lacks required permissions | Runtime FIS API error | AWS FIS returns descriptive permission errors at experiment execution time |
 | S3 bucket name > 63 characters | `validation` block or `precondition` | `"S3 bucket name exceeds 63 characters. Shorten ci_commit_ref_name."` |
 | `environment` is empty | `validation` block on variable | `"environment must not be empty."` |
 | `ci_commit_ref_name` is empty | `validation` block on variable | `"ci_commit_ref_name must not be empty."` |
-| `COUNT(n)` where n ≤ 0 | `validation` block / `precondition` | `"COUNT selection_mode requires n > 0."` |
-| `PERCENT(n)` where n < 1 or n > 100 | `validation` block / `precondition` | `"PERCENT selection_mode requires n between 1 and 100."` |
-| Invalid `selection_mode` format | `validation` block / `precondition` | `"selection_mode must be ALL, COUNT(n), or PERCENT(n)."` |
+| `COUNT(n)` where n ≤ 0 | `precondition` via `local.invalid_count_bounds` | `"COUNT selection_mode requires n > 0."` |
+| `PERCENT(n)` where n < 1 or n > 100 | `precondition` via `local.invalid_percent_bounds` | `"PERCENT selection_mode requires n between 1 and 100."` |
+| Invalid `selection_mode` format | `precondition` via `local.invalid_selection_mode_formats` | `"selection_mode must be ALL, COUNT(n), or PERCENT(n)."` |
+| Target specifies both `resource_arns` and `resource_tags` | `validation` block on `experiment_templates` variable | `"A target cannot specify both resource_arns and resource_tags. Use one or the other."` |
 | Empty `resource_arns` with no `resource_tags` | `precondition` on target | `"Target must specify non-empty resource_arns or resource_tags."` |
 
 ### Provider/API-Level Errors (Delegated)
@@ -540,7 +803,7 @@ The module uses two complementary testing strategies:
 | Property 8 | Generate template keys and environment values, verify Name tag follows convention |
 | Property 9 | Generate varying numbers of templates with a fixed environment, verify exactly one log group with correct name |
 | Property 10 | Generate targets with empty and non-empty resource_arns/resource_tags, verify validation behavior |
-| Property 11 | Generate template keys, verify output map has matching entries with non-empty id/arn/name |
+| Property 11 | Generate template keys, verify output map has matching entries with non-empty id/arn/name; verify arn follows `arn:aws:fis:{region}:{account_id}:experiment-template/{id}` pattern |
 
 **Note**: Properties 1, 2, 7, and 8 can be tested as pure functions (naming/validation logic) without provisioning infrastructure. Properties 3, 4, 5, 6, 9, 10, and 11 require Terraform plan/apply verification and are best validated through Terratest integration tests with property-based input generation.
 

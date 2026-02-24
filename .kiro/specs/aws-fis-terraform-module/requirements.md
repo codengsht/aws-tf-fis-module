@@ -89,6 +89,8 @@ The module input model for experiment templates is provider-aligned: it mirrors 
 14. THE Terraform AWS provider and AWS FIS API SHALL be the authoritative validators for action/target compatibility and detailed parameter correctness.
 15. THE FIS_Module SHALL accept a required `environment` input variable and use it in naming.
 16. THE FIS_Module SHALL name templates using the convention `fis-{service}-{scenario}-{environment}`.
+17. THE FIS_Module SHALL accept an optional `experiment_options` block per template with `account_targeting` (default `"single-account"`) and `empty_target_resolution_mode` (default `"fail"`).
+18. THE FIS_Module SHALL accept an optional `experiment_report_configuration` block per template with S3 output configuration, CloudWatch dashboard data sources, and pre/post experiment duration settings.
 
 ### Requirement 5: CloudWatch Logs Configuration
 
@@ -113,6 +115,7 @@ The module input model for experiment templates is provider-aligned: it mirrors 
 1. THE FIS_Module SHALL NOT include configuration for multi-account FIS experiments.
 2. THE FIS_Module SHALL document that multi-account experiments are out of scope.
 3. THE FIS_Module SHALL scope template target references to the current account context where applicable.
+4. WHEN `experiment_options.account_targeting` is provided, THE FIS_Module SHALL pass the value through to the provider; the default value `"single-account"` reinforces single-account scope.
 
 ### Requirement 7: Target Resource Inputs and Non-Creation Boundaries
 
