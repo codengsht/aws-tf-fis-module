@@ -53,6 +53,7 @@ The module input model for experiment templates is provider-aligned: it mirrors 
 4. THE FIS_Module SHALL accept `ci_commit_ref_name` as a required input variable (sourced from the GitLab CI/CD `CI_COMMIT_REF_NAME` environment variable).
 5. THE FIS_Module SHALL construct the bucket name from `fis-lambda-config-${account_id}-${ci_commit_ref_name}`.
 6. THE FIS_Module SHALL validate that the final bucket name satisfies S3 naming constraints, including maximum length of 63 characters.
+7. THE FIS_Module SHALL validate that `ci_commit_ref_name` contains only lowercase letters, numbers, and hyphens (`[a-z0-9-]`), does not start or end with a hyphen, and does not contain consecutive hyphens, to ensure the resulting S3 bucket name is fully S3-compliant and DNS-compatible.
 
 ### Requirement 3: Experiment Role Reference and Validation
 
@@ -129,6 +130,7 @@ The module input model for experiment templates is provider-aligned: it mirrors 
 4. THE FIS_Module SHALL NOT create DynamoDB resources.
 5. THE FIS_Module SHALL NOT create Lambda functions.
 6. THE FIS_Module SHALL NOT create network infrastructure resources.
+7. WHEN a target uses `resource_tags` for selection, THE FIS_Module SHALL validate that at least one tag entry is provided and that each tag entry has a non-empty (after trimming) `key` and a non-empty (after trimming) `value`.
 
 ### Requirement 8: Tag-Gating Roadmap (Deferred)
 

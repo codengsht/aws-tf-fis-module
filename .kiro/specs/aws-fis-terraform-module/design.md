@@ -171,6 +171,11 @@ sequenceDiagram
 | `ci_commit_ref_name` | `string` | GitLab CI/CD branch/tag ref used in S3 bucket naming |
 | `experiment_templates` | `map(object({...}))` | Map of experiment template definitions (see schema below) |
 
+> **Caller sanitization note**: GitLab branch names often contain characters invalid for S3 bucket names (uppercase, slashes, underscores). Callers (e.g., GitLab CI pipelines) should sanitize `CI_COMMIT_REF_NAME` before passing it to the module:
+> ```bash
+> echo "$CI_COMMIT_REF_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//'
+> ```
+
 #### `experiment_templates` Object Schema
 
 ```hcl
@@ -263,6 +268,18 @@ variable "experiment_templates" {
       ]) if length(tpl.targets) > 0
     ])
     error_message = "A target cannot specify both resource_arns and resource_tags. Use one or the other."
+  }
+
+  validation {
+    condition = alltrue([
+      for tpl_key, tpl in var.experiment_templates : alltrue([
+        for tgt_key, tgt in tpl.targets : alltrue([
+          for tag in tgt.resource_tags :
+            trimspace(tag.key) != "" && trimspace(tag.value) != ""
+        ])
+      ]) if length(tpl.targets) > 0
+    ])
+    error_message = "Each resource_tag entry must have a non-empty key and a non-empty value."
   }
 }
 ```
@@ -489,7 +506,10 @@ This is consumed by `outputs.tf` to include `arn` in the `experiment_templates` 
 The module implements minimal validation:
 
 1. **`environment`** — `validation { condition = length(var.environment) > 0 }` (non-empty)
-2. **`ci_commit_ref_name`** — `validation { condition = length(var.ci_commit_ref_name) > 0 }` (non-empty)
+2. **`ci_commit_ref_name`** — multiple validation blocks:
+   - Non-empty: `validation { condition = length(var.ci_commit_ref_name) > 0 }`
+   - S3-safe characters only (lowercase letters, numbers, hyphens): `validation { condition = can(regex("^[a-z0-9]([a-z0-9-]*[a-z0-9])?$", var.ci_commit_ref_name)) }` — rejects uppercase, underscores, slashes, periods, and other characters that violate S3 naming rules or cause DNS/TLS issues
+   - No consecutive hyphens: `validation { condition = !can(regex("--", var.ci_commit_ref_name)) }` — prevents consecutive hyphens which can conflict with S3 reserved suffixes
 3. **S3 bucket name length** — validated via `locals` computation + `check` or `precondition` (≤63 chars)
 4. **`selection_mode`** — custom validation logic:
 
@@ -541,6 +561,8 @@ These locals are consumed by `precondition` or `validation` blocks:
 - `length(local.invalid_selection_mode_formats) == 0` — rejects unknown formats
 - `length(local.invalid_count_bounds) == 0` — rejects `COUNT(0)` or negative
 - `length(local.invalid_percent_bounds) == 0` — rejects `PERCENT(0)` or `PERCENT(101+)`
+
+5. **`resource_tags` entries** — validation block ensures each tag has non-empty `key` and `value` (after `trimspace`). Combined with the existing mutual exclusivity check and the `resource_arns` non-empty check, this ensures targets always have meaningful identifiers.
 
 All other validation (action/target compatibility, parameter correctness, resource type validity) is delegated to the Terraform AWS provider and AWS FIS API.
 
@@ -726,15 +748,21 @@ classDiagram
 
 ### Property 10: Non-Empty Target Identifier Validation
 
-*For any* target that specifies `resource_arns` directly, the module SHALL validate that the list is non-empty. An empty `resource_arns` list (when no `resource_tags` are provided) SHALL cause a validation error.
+*For any* target that specifies `resource_arns` directly, the module SHALL validate that the list is non-empty. *For any* target that specifies `resource_tags`, the module SHALL validate that at least one tag entry exists and that each tag entry has a non-empty (after trimming) `key` and `value`. An empty `resource_arns` list (when no `resource_tags` are provided) or `resource_tags` with blank entries SHALL cause a validation error.
 
-**Validates: Requirements 7.2**
+**Validates: Requirements 7.2, 7.7**
 
 ### Property 11: Output Map Completeness
 
 *For any* experiment template key in the input map, the `experiment_templates` output map SHALL contain a corresponding entry with non-empty `id`, `arn`, and `name` fields. The `arn` is constructed as `arn:aws:fis:{region}:{account_id}:experiment-template/{id}` using `data.aws_region.current.name` and `data.aws_caller_identity.current.account_id`, since the `aws_fis_experiment_template` resource only exports `id`.
 
 **Validates: Requirements 9.4**
+
+### Property 12: ci_commit_ref_name S3-Safe Character Validation
+
+*For any* `ci_commit_ref_name` value, the module SHALL reject values containing characters outside `[a-z0-9-]`, values starting or ending with a hyphen, or values containing consecutive hyphens. Only values matching `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` without consecutive hyphens SHALL be accepted.
+
+**Validates: Requirements 2.7**
 
 
 ## Error Handling
@@ -748,11 +776,14 @@ classDiagram
 | S3 bucket name > 63 characters | `validation` block or `precondition` | `"S3 bucket name exceeds 63 characters. Shorten ci_commit_ref_name."` |
 | `environment` is empty | `validation` block on variable | `"environment must not be empty."` |
 | `ci_commit_ref_name` is empty | `validation` block on variable | `"ci_commit_ref_name must not be empty."` |
+| `ci_commit_ref_name` contains invalid characters | `validation` block on variable | `"ci_commit_ref_name must contain only lowercase letters, numbers, and hyphens, and must not start or end with a hyphen."` |
+| `ci_commit_ref_name` contains consecutive hyphens | `validation` block on variable | `"ci_commit_ref_name must not contain consecutive hyphens."` |
 | `COUNT(n)` where n ≤ 0 | `precondition` via `local.invalid_count_bounds` | `"COUNT selection_mode requires n > 0."` |
 | `PERCENT(n)` where n < 1 or n > 100 | `precondition` via `local.invalid_percent_bounds` | `"PERCENT selection_mode requires n between 1 and 100."` |
 | Invalid `selection_mode` format | `precondition` via `local.invalid_selection_mode_formats` | `"selection_mode must be ALL, COUNT(n), or PERCENT(n)."` |
 | Target specifies both `resource_arns` and `resource_tags` | `validation` block on `experiment_templates` variable | `"A target cannot specify both resource_arns and resource_tags. Use one or the other."` |
 | Empty `resource_arns` with no `resource_tags` | `precondition` on target | `"Target must specify non-empty resource_arns or resource_tags."` |
+| `resource_tags` entry has empty key or value | `validation` block on `experiment_templates` variable | `"Each resource_tag entry must have a non-empty key and a non-empty value."` |
 
 ### Provider/API-Level Errors (Delegated)
 
@@ -802,10 +833,11 @@ The module uses two complementary testing strategies:
 | Property 7 | Generate selection_mode strings (valid and invalid COUNT/PERCENT values), verify validation accepts/rejects correctly |
 | Property 8 | Generate template keys and environment values, verify Name tag follows convention |
 | Property 9 | Generate varying numbers of templates with a fixed environment, verify exactly one log group with correct name |
-| Property 10 | Generate targets with empty and non-empty resource_arns/resource_tags, verify validation behavior |
+| Property 10 | Generate targets with empty and non-empty resource_arns/resource_tags, verify validation behavior including rejection of blank tag key/value entries |
 | Property 11 | Generate template keys, verify output map has matching entries with non-empty id/arn/name; verify arn follows `arn:aws:fis:{region}:{account_id}:experiment-template/{id}` pattern |
+| Property 12 | Generate ci_commit_ref_name strings (valid and invalid: uppercase, underscores, slashes, periods, leading/trailing hyphens, consecutive hyphens), verify validation accepts only S3-safe values matching `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` without consecutive hyphens |
 
-**Note**: Properties 1, 2, 7, and 8 can be tested as pure functions (naming/validation logic) without provisioning infrastructure. Properties 3, 4, 5, 6, 9, 10, and 11 require Terraform plan/apply verification and are best validated through Terratest integration tests with property-based input generation.
+**Note**: Properties 1, 2, 7, 8, and 12 can be tested as pure functions (naming/validation logic) without provisioning infrastructure. Properties 3, 4, 5, 6, 9, 10, and 11 require Terraform plan/apply verification and are best validated through Terratest integration tests with property-based input generation.
 
 ### Integration Testing (Terratest)
 
@@ -842,7 +874,7 @@ tests/
 | Requirement | Property Test | Integration Test |
 |---|---|---|
 | Req 1 (Module structure) | — | Implicit (module loads) |
-| Req 2 (S3 bucket) | P1, P2 | Output assertions |
+| Req 2 (S3 bucket) | P1, P2, P12 | Output assertions |
 | Req 3 (IAM role) | — | Role ARN output check |
 | Req 4 (Templates) | P3, P4, P5, P6, P7, P8 | Template creation per service |
 | Req 5 (CloudWatch) | P9 | Log group output check |
