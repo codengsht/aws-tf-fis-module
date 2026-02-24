@@ -12,7 +12,7 @@ Incrementally build the FIS Terraform module file-by-file, starting with foundat
     - Define `ci_commit_ref_name` (string, required, with validation blocks: non-empty, S3-safe characters regex `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`, no consecutive hyphens)
     - Define `experiment_templates` variable with the full `map(object({...}))` type schema from the design (actions, targets, stop_conditions, tags, experiment_options, experiment_report_configuration)
     - Include validation blocks on `experiment_templates`: mutual exclusivity of `resource_arns`/`resource_tags`, non-empty `resource_tags` key/value
-    - _Requirements: 2.4, 2.7, 4.1, 4.5, 4.6, 4.7, 4.8, 4.15, 4.17, 4.18, 7.7_
+    - _Requirements: 2.4, 2.7, 4.1, 4.5, 4.6, 4.7, 4.8, 4.15, 4.17, 4.18, 7.1, 7.7, 8.2, 8.3_
 
   - [ ] 1.2 Create `main.tf` with provider configuration and data sources
     - Add `data.aws_caller_identity.current` for account ID resolution
@@ -66,8 +66,10 @@ Incrementally build the FIS Terraform module file-by-file, starting with foundat
     - Wire `role_arn` from `data.aws_iam_role.fis_experiment_role.arn`
     - Implement dynamic blocks: `action` (with nested `target`, `parameter`), `target` (with nested `resource_tag`, `filter`), `stop_condition`, `experiment_options`, `experiment_report_configuration` (with nested `outputs`/`s3_configuration`, `data_sources`/`cloudwatch_dashboards`)
     - Implement `log_configuration` block referencing `aws_cloudwatch_log_group.fis_experiments.arn` with `log_schema_version = 2`
+    - Add `precondition` inside the target block to reject targets with both `resource_arns` and `resource_tags` empty — ensures every target has at least one meaningful identifier
     - Set Name tag to `fis-${each.key}-${var.environment}`
-    - _Requirements: 4.1, 4.2, 4.3, 4.5, 4.6, 4.7, 4.8, 4.16, 4.17, 4.18, 5.3, 6.4_
+    - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7, 4.8, 4.13, 4.14, 4.16, 4.17, 4.18, 5.3, 6.1, 6.3, 6.4, 7.1, 7.2_
+    - **Note**: Req 4.4 (service scope) is enforced by the provider, not by module-level validation. Req 4.13 and 4.14 (no exhaustive cross-field validation; provider/API as authoritative validators) are intentional design constraints — the module deliberately omits per-service cross-field pre-validation and delegates to the Terraform AWS provider and AWS FIS API.
 
   - [ ] 4.3 Add selection_mode validation logic in `fis_templates.tf` or `variables.tf`
     - Implement `locals` block parsing selection_mode into components (is_all, is_count, is_percent, numeric_value)
@@ -112,7 +114,8 @@ Incrementally build the FIS Terraform module file-by-file, starting with foundat
     - Output `experiment_templates` map with `id`, `arn` (constructed via `locals`), and `name` per template
     - Add `locals` block for constructed ARNs: `arn:aws:fis:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:experiment-template/${id}`
     - Output `log_group_name` and `log_group_arn` from `aws_cloudwatch_log_group.fis_experiments`
-    - _Requirements: 3.4, 9.1, 9.2, 9.3, 9.4, 9.5_
+    - _Requirements: 3.4, 9.1, 9.2, 9.3, 9.4, 9.5, 9.6_
+    - **Note**: Req 9.6 (output behavior consistent with minimal validation) is a design principle — outputs reflect what the provider returns without additional module-level transformation or validation beyond what is documented.
 
   - [ ]* 6.2 Write property test for template count equals input count (Property 3)
     - **Property 3: Template Count Equals Input Count**
@@ -143,7 +146,8 @@ Incrementally build the FIS Terraform module file-by-file, starting with foundat
     - Create `tests/fixtures/variables.tf` — test input variables
     - Create `tests/fixtures/outputs.tf` — expose FIS_Module outputs for assertions
     - Create `tests/fixtures/terraform.tfvars` — default test values
-    - _Requirements: 10.1, 10.2_
+    - Verify that the FIS_Module does not create Kinesis, DynamoDB, Lambda, or network infrastructure resources — these are provisioned externally by the test fixtures using internal modules, not by the FIS_Module itself
+    - _Requirements: 7.3, 7.4, 7.5, 7.6, 10.1, 10.2_
 
   - [ ]* 8.2 Write Terratest integration test (`tests/fis_module_test.go`)
     - Implement `TestFISModuleFullDeployment` using Terratest
@@ -159,6 +163,20 @@ Incrementally build the FIS Terraform module file-by-file, starting with foundat
 - [ ] 9. Final checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
+- [ ] 10. Create module documentation (README.md, CHANGELOG.md)
+  - [ ] 10.1 Generate `README.md` using `terraform-docs`
+    - Run `terraform-docs markdown table . > README.md` to auto-generate input/output documentation from the module's HCL
+    - Add manual sections above the generated content: module overview, usage example, supported service scope (Req 4.4), IAM prerequisite contract (`FISExperimentRole`), non-creation boundaries (module does not create Kinesis, DynamoDB, Lambda, or network resources — Reqs 7.3–7.6, 1.5), shared log group rationale (Req 5.5), multi-account exclusion (Req 6.2), deferred tag-gating (Req 8.1), and minimal validation philosophy (Reqs 4.13, 4.14)
+    - _Requirements: 1.5, 4.4, 4.13, 4.14, 5.5, 6.2, 7.3, 7.4, 7.5, 7.6, 8.1_
+
+  - [ ] 10.2 Create `CHANGELOG.md`
+    - Document initial release (v1.0.0) with summary of features: experiment template creation, S3/KMS provisioning via internal modules, shared CloudWatch log group, IAM role lookup, provider-aligned input schema, experiment options, experiment report configuration
+    - Note deferred items: tag-gating enforcement, multi-account support
+
+- [ ] 11. Final documentation checkpoint
+  - Verify README covers all documentation-only requirements
+  - Verify terraform-docs output is current with module inputs/outputs
+
 ## Notes
 
 - Tasks marked with `*` are optional and can be skipped for faster MVP
@@ -167,3 +185,6 @@ Incrementally build the FIS Terraform module file-by-file, starting with foundat
 - Property tests for Properties 1, 2, 7, 8, 12 are pure function tests (no infrastructure); Properties 3, 4, 5, 6, 9, 10, 11 require Terraform plan/apply and are best validated via Terratest with property-based input generation
 - All 12 correctness properties from the design document are covered by property test tasks
 - The module uses HCL (Terraform) for infrastructure code and Go for all tests (rapid + Terratest)
+- Documentation-only requirements (5.5, 6.2, 8.1, 4.4, 4.13, 4.14, 7.3–7.6, 1.5) are addressed in Task 10 (README.md) rather than as code tasks
+- "SHALL NOT" requirements (4.13, 4.14, 7.3–7.6, 1.5, 8.3) are verified by absence — the module code does not contain the excluded resources/logic, and the README documents these boundaries explicitly
+- Req 9.6 (output behavior consistent with minimal validation) is a design principle noted in Task 6.1, not a standalone code deliverable
