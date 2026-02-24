@@ -8,11 +8,13 @@ The module does NOT create IAM roles, IAM policies, or workload resources (Kines
 
 The module uses internal Terraform modules from Artifactory for S3 and KMS. Tag-based enforcement for target resources is intentionally deferred in this release.
 
+The module input model for experiment templates is provider-aligned: it mirrors Terraform AWS provider `aws_fis_experiment_template` concepts where possible. Service-specific and cross-field experiment validity is primarily enforced by Terraform provider and AWS FIS API validation, while this module applies only minimal module-level validation.
+
 ## Glossary
 
 - **FIS_Module**: Terraform module that provisions FIS supporting infrastructure and experiment templates
 - **FISExperimentRole**: Default IAM role name used by FIS for experiment execution
-- **Experiment_Role_Name**: Input role name used for IAM lookup; defaults to `FISExperimentRole`
+- **Experiment_Role_Name**: Hardcoded IAM role name `FISExperimentRole` used for IAM lookup
 - **Experiment_Role_Arn**: ARN resolved from IAM role lookup and attached to experiment templates
 - **S3_Module**: Existing internal Terraform module for S3 bucket provisioning (Artifactory)
 - **KMS_Module**: Existing internal Terraform module for KMS key provisioning (Artifactory)
@@ -21,6 +23,9 @@ The module uses internal Terraform modules from Artifactory for S3 and KMS. Tag-
 - **Selection_Mode**: FIS target selection mode (`ALL`, `COUNT(n)`, `PERCENT(n)`)
 - **Action_Dependency**: FIS action ordering via `start_after`
 - **Log_Configuration**: FIS experiment template configuration for CloudWatch logs
+- **Environment**: Required module input used in naming conventions (`fis-{service}-{scenario}-{environment}` and shared log group naming)
+- **ci_commit_ref_name**: Required module input variable sourced from the GitLab CI/CD `CI_COMMIT_REF_NAME` environment variable; used in resource naming (for example, S3 bucket name)
+- **Terratest**: Go-based integration testing framework used to validate Terraform module behavior by provisioning real infrastructure and running assertions
 
 ## Requirements
 
@@ -44,12 +49,10 @@ The module uses internal Terraform modules from Artifactory for S3 and KMS. Tag-
 
 1. THE FIS_Module SHALL provision exactly one S3 bucket using the S3_Module.
 2. THE FIS_Module SHALL provision a KMS key using the KMS_Module and configure S3 encryption with that key.
-3. THE FIS_Module SHALL construct the bucket name from `fis-lambda-config-${account_id}-${ci_commit_ref_name_sanitized}`.
-4. THE FIS_Module SHALL sanitize `ci_commit_ref_name` before using it in the S3 bucket name:
-   - Convert to lowercase.
-   - Replace unsupported characters with `-`.
-   - Trim leading/trailing separators.
-5. THE FIS_Module SHALL validate that the final bucket name satisfies S3 naming constraints, including maximum length of 63 characters.
+3. THE FIS_Module SHALL resolve the AWS account ID automatically using `data.aws_caller_identity` and SHALL NOT require `account_id` as a module input.
+4. THE FIS_Module SHALL accept `ci_commit_ref_name` as a required input variable (sourced from the GitLab CI/CD `CI_COMMIT_REF_NAME` environment variable).
+5. THE FIS_Module SHALL construct the bucket name from `fis-lambda-config-${account_id}-${ci_commit_ref_name}`.
+6. THE FIS_Module SHALL validate that the final bucket name satisfies S3 naming constraints, including maximum length of 63 characters.
 
 ### Requirement 3: Experiment Role Reference and Validation
 
@@ -57,8 +60,8 @@ The module uses internal Terraform modules from Artifactory for S3 and KMS. Tag-
 
 #### Acceptance Criteria
 
-1. THE FIS_Module SHALL accept an input variable `experiment_role_name` with default value `FISExperimentRole`.
-2. THE FIS_Module SHALL resolve the role using IAM lookup by role name.
+1. THE FIS_Module SHALL hardcode the IAM role name as `FISExperimentRole`.
+2. THE FIS_Module SHALL resolve the role using IAM lookup by the hardcoded name `FISExperimentRole`.
 3. IF the role does not exist, THEN THE FIS_Module SHALL fail with a clear validation/error message.
 4. THE FIS_Module SHALL output the resolved Experiment_Role_Arn.
 5. THE FIS_Module SHALL NOT create IAM roles.
@@ -66,25 +69,26 @@ The module uses internal Terraform modules from Artifactory for S3 and KMS. Tag-
 
 ### Requirement 4: Experiment Template Schema and Creation
 
-**User Story:** As a platform engineer, I want to define FIS templates through a strict input schema, so templates are consistent and validation is deterministic.
+**User Story:** As a platform engineer, I want to define FIS templates through a provider-aligned input schema, so templates are consistent while keeping module logic maintainable.
 
 #### Acceptance Criteria
 
-1. THE FIS_Module SHALL accept a structured `experiment_templates` input (map/object schema) that defines template metadata, targets, actions, stop conditions, and tags.
+1. THE FIS_Module SHALL accept a structured `experiment_templates` input (map/object schema) that mirrors `aws_fis_experiment_template` arguments and blocks as closely as practical.
 2. THE FIS_Module SHALL create one Experiment_Template per `experiment_templates` entry.
-3. THE FIS_Module SHALL assign the resolved Experiment_Role_Arn to every Experiment_Template.
+3. THE FIS_Module SHALL assign the resolved Experiment_Role_Arn (from the hardcoded `FISExperimentRole` lookup) to every Experiment_Template.
 4. THE FIS_Module SHALL support template targets for this initial service scope only: S3, Kinesis, DynamoDB, Lambda, and Network.
 5. THE FIS_Module SHALL require at least one stop condition per template; WHEN not provided, THE FIS_Module SHALL default to a stop condition with `source = "none"`.
-6. THE FIS_Module SHALL validate Selection_Mode values as `ALL`, `COUNT(n)`, or `PERCENT(n)`.
-7. WHEN Selection_Mode is `COUNT(n)`, THE FIS_Module SHALL validate `n` is an integer greater than 0.
-8. WHEN Selection_Mode is `PERCENT(n)`, THE FIS_Module SHALL validate `n` is an integer from 1 through 100.
-9. THE FIS_Module SHALL fail validation for invalid Selection_Mode format or bounds.
-10. WHEN Selection_Mode is not specified, THE FIS_Module SHALL default to `ALL`.
-11. THE FIS_Module SHALL accept optional target filters and optional target tags for target resolution.
-12. WHEN `start_after` is used, THE FIS_Module SHALL validate that referenced actions exist in the same template.
-13. WHEN an action has a duration parameter, THE FIS_Module SHALL accept ISO 8601 duration format.
-14. THE FIS_Module SHALL fail-fast when required target inputs for a template are missing.
-15. THE FIS_Module SHALL name templates using the convention `fis-{service}-{scenario}-{environment}`.
+6. THE FIS_Module SHALL accept optional target filters and optional target tags for target resolution.
+7. WHEN Selection_Mode is not specified for a target, THE FIS_Module SHALL default it to `ALL`.
+8. THE FIS_Module SHALL accept optional `start_after` action dependencies and optional action parameters, including duration values passed through as provided.
+9. THE FIS_Module SHALL implement minimal module-level validation only (for example: non-empty required module inputs, non-empty target identifier values when directly provided, and Selection_Mode bounds checks).
+10. WHEN Selection_Mode is `COUNT(n)`, THE FIS_Module SHALL validate that `n` is an integer greater than 0.
+11. WHEN Selection_Mode is `PERCENT(n)`, THE FIS_Module SHALL validate that `n` is an integer from 1 through 100.
+12. IF Selection_Mode format is invalid or `n` is out of bounds, THEN THE FIS_Module SHALL fail with a descriptive validation error.
+13. THE FIS_Module SHALL NOT implement exhaustive per-service cross-field pre-validation for all experiment cases.
+14. THE Terraform AWS provider and AWS FIS API SHALL be the authoritative validators for action/target compatibility and detailed parameter correctness.
+15. THE FIS_Module SHALL accept a required `environment` input variable and use it in naming.
+16. THE FIS_Module SHALL name templates using the convention `fis-{service}-{scenario}-{environment}`.
 
 ### Requirement 5: CloudWatch Logs Configuration
 
@@ -92,10 +96,13 @@ The module uses internal Terraform modules from Artifactory for S3 and KMS. Tag-
 
 #### Acceptance Criteria
 
-1. THE FIS_Module SHALL create a CloudWatch Logs log group for each Experiment_Template.
-2. THE FIS_Module SHALL use the naming pattern `/aws/fis/{experiment_template_name}` for default log group names.
-3. THE FIS_Module SHALL attach each created log group to the template Log_Configuration.
-4. THE FIS_Module SHALL output log group names and ARNs for created templates.
+1. THE FIS_Module SHALL create a single shared CloudWatch Logs log group for all Experiment_Templates managed by this module.
+2. THE FIS_Module SHALL use the default naming pattern `/aws/fis/experiments/{environment}` for the shared log group.
+3. THE FIS_Module SHALL attach the shared log group to each template Log_Configuration.
+4. THE FIS_Module SHALL output the shared log group name and ARN.
+5. THE FIS_Module SHALL document that a shared log group is the default for periodic experiment execution and low FIS log volume.
+6. THE FIS_Module SHALL require the `environment` input used in shared log group naming.
+7. THE FIS_Module SHALL configure the shared CloudWatch Logs log group with a retention period of 30 days.
 
 ### Requirement 6: No Multi-Account Experiment Support
 
@@ -140,5 +147,21 @@ The module uses internal Terraform modules from Artifactory for S3 and KMS. Tag-
 2. THE FIS_Module SHALL output S3 bucket name and ARN.
 3. THE FIS_Module SHALL output KMS key ID and ARN.
 4. THE FIS_Module SHALL output Experiment_Template IDs, ARNs, and names.
-5. THE FIS_Module SHALL output CloudWatch log group names and ARNs per template.
-6. THE FIS_Module SHALL keep output behavior consistent with fail-fast validation for required inputs.
+5. THE FIS_Module SHALL output the single shared CloudWatch log group name and ARN.
+6. THE FIS_Module SHALL keep output behavior consistent with minimal module-level validation and provider/API authoritative validation.
+
+### Requirement 10: Terratest Integration Testing
+
+**User Story:** As a platform engineer, I want automated integration tests using Terratest, so that the FIS module is validated end-to-end against real AWS infrastructure.
+
+#### Acceptance Criteria
+
+1. THE Terratest SHALL provision one target resource per supported service (S3, Kinesis, DynamoDB, Lambda, Network) using internal modules (S3_Module, KMS_Module, Lambda_Module, and equivalent modules for Kinesis, DynamoDB, and Network).
+2. THE Terratest SHALL invoke the FIS_Module with the provisioned target resources as inputs.
+3. THE Terratest SHALL validate that Experiment_Templates are created for each supported service target.
+4. THE Terratest SHALL validate that the FIS_Module outputs include the S3 bucket name and ARN.
+5. THE Terratest SHALL validate that the FIS_Module outputs include the KMS key ID and ARN.
+6. THE Terratest SHALL validate that the FIS_Module outputs include the single shared CloudWatch log group name and ARN.
+7. THE Terratest SHALL validate that each Experiment_Template references the resolved Experiment_Role_Arn.
+8. THE Terratest SHALL validate that the FIS_Module outputs include Experiment_Template IDs, ARNs, and names.
+9. THE Terratest SHALL perform resource cleanup and teardown (for example, `defer terraform.Destroy()`) after test execution to ensure all provisioned resources are destroyed.

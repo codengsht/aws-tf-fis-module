@@ -50,3 +50,40 @@
   - Tag enforcement is deferred.
   - Existing Lambda targets only; no Lambda resource provisioning.
 - After requirements are updated, run a second pass to ensure acceptance criteria are non-conflicting and directly testable.
+
+
+
+############# 4th after some changes Suggestions #############
+
+Findings (ordered by severity)
+
+High: Multi-account is declared out of scope, but not enforceable with current input rules.
+No multi-account is stated in requirements.md, yet target inputs still allow arbitrary ARNs/identifiers with only non-empty validation in requirements.md and requirements.md.
+Impact: Cross-account targets can slip through until runtime.
+
+High: S3 naming still uses raw ci_commit_ref_name without sanitization requirements.
+You require ci_commit_ref_name in requirements.md and directly interpolate it in requirements.md.
+Impact: Common branch/tag characters (/, _, uppercase) can break bucket naming and fail applies unexpectedly.
+
+Medium: Hardcoded FISExperimentRole may block multi-env reuse.
+Role name is fixed in requirements.md and requirements.md.
+Impact: If environments use different role names, module reuse requires code changes instead of input configuration.
+
+Medium: Defaulting stop condition to source = "none" is operationally risky.
+Current behavior in requirements.md.
+Impact: Experiments can run without alarm guardrails unless callers remember to add them.
+
+Medium: Terratest requirements cover happy path only; key failure modes are untested.
+Current tests in requirements.md focus on create/outputs.
+Impact: Regressions in validation behavior (invalid selection_mode, missing role, invalid bucket name, cross-account input) may not be caught early.
+
+Low: Design artifact is still empty, which leaves implementation details implicit.
+See design.md.
+Impact: Higher chance of divergent implementation decisions despite good requirements.
+
+Open questions
+
+Do you want strict rejection of cross-account ARNs at input time, or only documentation-level “out of scope”?
+Should ci_commit_ref_name be replaced by CI_COMMIT_REF_SLUG semantics (or explicit sanitization rules)?
+Do you want to keep hardcoded role name, or allow override with default FISExperimentRole?
+Should stop_conditions = none require explicit opt-in flag?
