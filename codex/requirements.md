@@ -44,12 +44,8 @@ The module uses internal Terraform modules from Artifactory for S3 and KMS. Tag-
 
 1. THE FIS_Module SHALL provision exactly one S3 bucket using the S3_Module.
 2. THE FIS_Module SHALL provision a KMS key using the KMS_Module and configure S3 encryption with that key.
-3. THE FIS_Module SHALL construct the bucket name from `fis-lambda-config-${account_id}-${ci_commit_ref_name_sanitized}`.
-4. THE FIS_Module SHALL sanitize `ci_commit_ref_name` before using it in the S3 bucket name:
-   - Convert to lowercase.
-   - Replace unsupported characters with `-`.
-   - Trim leading/trailing separators.
-5. THE FIS_Module SHALL validate that the final bucket name satisfies S3 naming constraints, including maximum length of 63 characters.
+3. THE FIS_Module SHALL construct the bucket name from `fis-lambda-config-${account_id}-${ci_commit_ref_name}`.
+4. THE FIS_Module SHALL validate that the final bucket name satisfies S3 naming constraints, including maximum length of 63 characters.
 
 ### Requirement 3: Experiment Role Reference and Validation
 
@@ -92,10 +88,11 @@ The module uses internal Terraform modules from Artifactory for S3 and KMS. Tag-
 
 #### Acceptance Criteria
 
-1. THE FIS_Module SHALL create a CloudWatch Logs log group for each Experiment_Template.
-2. THE FIS_Module SHALL use the naming pattern `/aws/fis/{experiment_template_name}` for default log group names.
-3. THE FIS_Module SHALL attach each created log group to the template Log_Configuration.
-4. THE FIS_Module SHALL output log group names and ARNs for created templates.
+1. THE FIS_Module SHALL create a single shared CloudWatch Logs log group for all Experiment_Templates managed by this module.
+2. THE FIS_Module SHALL use the default naming pattern `/aws/fis/experiments/{environment}` for the shared log group.
+3. THE FIS_Module SHALL attach the shared log group to each template Log_Configuration.
+4. THE FIS_Module SHALL output the shared log group name and ARN.
+5. THE FIS_Module SHALL document that a shared log group is the default for periodic experiment execution and low FIS log volume.
 
 ### Requirement 6: No Multi-Account Experiment Support
 
